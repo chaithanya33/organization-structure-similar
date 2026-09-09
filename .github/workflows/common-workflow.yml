@@ -1,1 +1,46 @@
+name: Pick-Winners Game-End Settlement Service
 
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to (dev, qa, uat, prod)'
+        required: true
+        default: "dev"
+      k8s_path:
+        description: 'k8s manifest folder path'
+        required: true
+        default: "pw-game-end-settlement"
+  push:
+   branches:
+  #  - develop
+  #  - qa
+  #  - uat
+     - release
+
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  deploy:
+    uses: Pick-Winners/cw-devops-scripts/.github/workflows/common-workflow.yml@main
+    with:
+      environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'develop' && 'dev' || github.ref_name == 'qa' && 'dev' || github.ref_name == 'uat' && 'dev' || github.ref_name == 'release' && 'dev' || 'dev') }}
+      k8s_path: ${{ github.event.inputs.k8s_path || 'dev-ue1-setteled' }}
+    secrets:
+      PAT_GIT_TOKEN: ${{ secrets.PAT_GIT_TOKEN }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      DEV_EKS_CLUSTER_NAME: dev-eks-cluster
+      DEV_ECR_REPO: dev-ue1-setteled
+      QA_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      QA_EKS_CLUSTER_NAME: dev-eks-cluster
+      QA_ECR_REPO: dev-ue1-setteled
+      UAT_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      UAT_EKS_CLUSTER_NAME: dev-eks-cluster
+      UAT_ECR_REPO: dev-ue1-setteled
+      PROD_AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      PROD_EKS_CLUSTER_NAME: dev-eks-cluster
+      PROD_ECR_REPO: dev-ue1-setteled
