@@ -1,0 +1,162 @@
+
+name: Build Status 4 Settlement Service and Deploy to EKS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - develop
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: dev-eks-cluster
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  SERVICE_NAME: dev-ue1-settled
+  env: dev
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Configure AWS CLI
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3 python3-pip jq
+        pip3 install awscli
+
+    - name: Configure AWS Credentials using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/Github_Action_Role_2
+        aws-region: us-east-1
+
+    - name: Setup kubectl
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x ./kubectl
+        sudo mv ./kubectl /usr/local/bin/kubectl
+
+    - name: Install AWS IAM Authenticator
+      run: |
+        curl -Lo aws-iam-authenticator https://github.com/kubernetes-sigs/aws-iam-authenticator/releases/download/v0.5.9/aws-iam-authenticator_0.5.9_linux_amd64
+        chmod +x ./aws-iam-authenticator
+        sudo mv aws-iam-authenticator /usr/local/bin/
+
+    - name: Clone api_utils@release branch
+      run: |
+        git clone --depth 1 --branch release https://${{ secrets.PAT_GIT_TOKEN }}@github.com/Pick-Winners/pw_api_utils.git
+        ls -la
+
+    - name: Prepare environment file
+      run: |
+        cp .dev.env .env
+
+    - name: Retrieve secrets from AWS Secrets Manager
+      run: |
+        secret=$(aws secretsmanager get-secret-value \
+          --secret-id "${{ env.env }}-ue1-backend-api-keys" \
+          --query "SecretString" \
+          --output text)
+
+        # PostgreSQL
+        db_url=$(echo "$secret" | jq -r '.db_url')
+        db_username=$(echo "$secret" | jq -r '.db_username')
+        db_pass=$(echo "$secret" | jq -r '.db_password')
+
+        # AWS credentials
+        access_key=$(echo "$secret" | jq -r '.access_key')
+        secret_key=$(echo "$secret" | jq -r '.secret_key')
+
+        # Kafka
+        kafka_bootstrap_servers=$(echo "$secret" | jq -r '.kafka_bootstrap_servers')
+
+        # AWS MariaDB
+        aws_mariadb_host=$(echo "$secret" | jq -r '.mariadb_host')
+        aws_mariadb_user=$(echo "$secret" | jq -r '.mariadb_user')
+        aws_mariadb_password=$(echo "$secret" | jq -r '.mariadb_pass')
+        aws_mariadb_name=$(echo "$secret" | jq -r '.mariadb_name')
+
+        # PostgreSQL
+        sed -i "s#localhost#${db_url}#g" .env
+        sed -i "s#root#${db_username}#g" .env
+        sed -i "s#password#${db_pass}#g" .env
+
+        # Application environment
+        sed -i "s#local#${{ env.env }}#g" .env
+
+        # AWS credentials
+        sed -i "s#access_key#${access_key}#g" .env
+        sed -i "s#secret_key#${secret_key}#g" .env
+
+        # Kafka bootstrap servers
+        sed -i "s#\"kafka_bootstrap_servers\"#${kafka_bootstrap_servers}#g" .env
+
+        # AWS MariaDB
+        sed -i "s#mariadb_host#${aws_mariadb_host}#g" .env
+        sed -i "s#mariadb_user#${aws_mariadb_user}#g" .env
+        sed -i "s#mariadb_pass#${aws_mariadb_password}#g" .env
+        sed -i "s#mariadb_name#${aws_mariadb_name}#g" .env
+
+    - name: Log in to Amazon ECR
+      run: |
+        aws ecr get-login-password \
+          --region ${{ env.AWS_REGION }} | \
+        docker login \
+          --username AWS \
+          --password-stdin \
+          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+
+    - name: Build, tag, and push Docker image
+      run: |
+        docker build -t ${{ env.SERVICE_NAME }}:latest .
+
+        docker tag \
+          ${{ env.SERVICE_NAME }}:latest \
+          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.SERVICE_NAME }}:latest
+
+        docker tag \
+          ${{ env.SERVICE_NAME }}:latest \
+          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.SERVICE_NAME }}:${{ env.env }}-${{ github.run_number }}
+
+        docker push \
+          ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.SERVICE_NAME }}:latest
+
+        # docker push \
+        #   ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/${{ env.SERVICE_NAME }}:${{ env.env }}-${{ github.run_number }}
+
+    - name: Configure kubectl to connect to EKS cluster
+      run: |
+        aws eks update-kubeconfig \
+          --region ${{ env.AWS_REGION }} \
+          --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Apply Kubernetes manifests
+      run: |
+        kubectl apply -f k8/manifest.yml --validate=false
+
+    # - name: Deploy Status 4 Settlement Service
+    #   run: |
+    #     IMAGE_TAG="${{ env.env }}-${{ github.run_number }}"
+
+    #     sed -i "s|__AWS_ACCOUNT_ID__|${{ secrets.AWS_ACCOUNT_ID }}|g" k8s/deployment.yml
+    #     sed -i "s|__IMAGE_TAG__|${IMAGE_TAG}|g" k8s/deployment.yml
+
+    #     kubectl apply -f k8s/deployment.yml --validate=false
+
+    # - name: Restart Status 4 Settlement Deployment
+    #   run: |
+    #     kubectl rollout restart deployment/${{ env.SERVICE_NAME }} -n ${{ env.env }}
+
+    #     kubectl rollout status \
+    #       deployment/${{ env.SERVICE_NAME }} \
+    #       -n ${{ env.env }} \
+    #       --timeout=300s
