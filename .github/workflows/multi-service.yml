@@ -1,0 +1,165 @@
+name: Deploy Comments Backend to EKS
+
+on:
+  push:
+    branches:
+      - test-branch
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # ---------------------------------------------------------
+      # Checkout
+      # ---------------------------------------------------------
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # AWS Authentication (OIDC)
+      # ---------------------------------------------------------
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ---------------------------------------------------------
+      # ECR Login
+      # ---------------------------------------------------------
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------------------------------------------------------
+      # Docker Buildx
+      # ---------------------------------------------------------
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # =========================================================
+      # BUILD + PUSH IMAGES
+      # Each service builds from its OWN folder (services/<svc>) so the
+      # Dockerfile's `COPY requirements.txt` / `COPY . .` / `COPY .env .env`
+      # resolve against that service's context (app/common is vendored there).
+      # =========================================================
+      - name: Build and Push Comments Service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/comments
+          file: services/comments/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cpw-comments:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/cpw-comments:latest
+
+      - name: Build and Push Gateway Service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/gateway
+          file: services/gateway/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cpw-gateway:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/cpw-gateway:latest
+
+      - name: Build and Push Media Service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/media
+          file: services/media/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cpw-media:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/cpw-media:latest
+
+      - name: Build and Push Moderation Service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/moderation
+          file: services/moderation/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cpw-moderation:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/cpw-moderation:latest
+
+      - name: Build and Push Realtime Service
+        uses: docker/build-push-action@v6
+        with:
+          context: services/realtime
+          file: services/realtime/Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cpw-realtime:${{ github.sha }}
+            ${{ env.ECR_REGISTRY }}/cpw-realtime:latest
+
+      # ---------------------------------------------------------
+      # Configure kubectl for EKS
+      # ---------------------------------------------------------
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER_NAME"
+
+      - name: Verify Cluster Access
+        run: kubectl get pods -n "$K8S_NAMESPACE"
+
+      # =========================================================
+      # DEPLOY: apply manifest -> set image -> restart -> wait
+      # =========================================================
+      - name: Deploy Comments Service
+        run: |
+          kubectl apply -f deploy/k8s/comments.yaml -n "$K8S_NAMESPACE"
+          kubectl set image deployment/comments \
+            comments="$ECR_REGISTRY/cpw-comments:${{ github.sha }}" -n "$K8S_NAMESPACE"
+          kubectl rollout restart deployment/comments -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/comments -n "$K8S_NAMESPACE" --timeout=300s
+
+      - name: Deploy Gateway Service
+        run: |
+          kubectl apply -f deploy/k8s/gateway.yaml -n "$K8S_NAMESPACE"
+          kubectl set image deployment/gateway \
+            gateway="$ECR_REGISTRY/cpw-gateway:${{ github.sha }}" -n "$K8S_NAMESPACE"
+          kubectl rollout restart deployment/gateway -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/gateway -n "$K8S_NAMESPACE" --timeout=300s
+
+      - name: Deploy Media Service
+        run: |
+          kubectl apply -f deploy/k8s/media.yaml -n "$K8S_NAMESPACE"
+          kubectl set image deployment/media \
+            media="$ECR_REGISTRY/cpw-media:${{ github.sha }}" -n "$K8S_NAMESPACE"
+          kubectl rollout restart deployment/media -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/media -n "$K8S_NAMESPACE" --timeout=300s
+
+      - name: Deploy Moderation Service
+        run: |
+          kubectl apply -f deploy/k8s/moderation.yaml -n "$K8S_NAMESPACE"
+          kubectl set image deployment/moderation \
+            moderation="$ECR_REGISTRY/cpw-moderation:${{ github.sha }}" -n "$K8S_NAMESPACE"
+          kubectl rollout restart deployment/moderation -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/moderation -n "$K8S_NAMESPACE" --timeout=300s
+
+      - name: Deploy Realtime Service
+        run: |
+          kubectl apply -f deploy/k8s/realtime.yaml -n "$K8S_NAMESPACE"
+          kubectl set image deployment/realtime \
+            realtime="$ECR_REGISTRY/cpw-realtime:${{ github.sha }}" -n "$K8S_NAMESPACE"
+          kubectl rollout restart deployment/realtime -n "$K8S_NAMESPACE"
+          kubectl rollout status deployment/realtime -n "$K8S_NAMESPACE" --timeout=300s
+
+      # ---------------------------------------------------------
+      # Final Pod Verification
+      # ---------------------------------------------------------
+      - name: Verify Pods
+        run: kubectl get pods -n "$K8S_NAMESPACE"
